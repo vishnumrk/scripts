@@ -1,0 +1,1634 @@
+package v.lang.frontend;
+
+import com.fasterxml.jackson.annotation.JsonProperty;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.EqualsAndHashCode;
+import lombok.NoArgsConstructor;
+
+import java.util.LinkedList;
+import java.util.List;
+
+public interface AstNode {
+    enum Kind {
+        //Statements
+        Program,
+        VariableDeclaration,
+
+        //Expressions
+        BinaryExpression,
+        AssignmentExpression,
+
+        MemberExpression,
+        CallExpression,
+
+        ObjectLiteral,
+        PropertyLiteral,
+        NumericLiteral,
+        Identifier,
+    }
+
+    @JsonProperty
+    Kind kind();
+
+    @Data
+    @EqualsAndHashCode(callSuper = false)
+    final class Program extends Statement {
+
+        private List<Statement> body;
+
+        public Program() {
+            body = new LinkedList<>();
+        }
+
+        @Override
+        public Kind kind() {
+            return Kind.Program;
+        }
+
+
+        public void add(Statement statement) {
+            this.body.add(statement);
+        }
+    }
+
+    @Data
+    @EqualsAndHashCode(callSuper = false)
+    final class VariableDeclaration extends Statement {
+
+        private boolean isConstant;
+        private String identifier;
+        private Expression value;
+
+        public VariableDeclaration(boolean isConstant, String identifier, Expression value) {
+            this.isConstant = isConstant;
+            this.identifier = identifier;
+            this.value = value;
+        }
+
+        @Override
+        public Kind kind() {
+            return Kind.VariableDeclaration;
+        }
+    }
+
+    @Data
+    @EqualsAndHashCode(callSuper = false)
+    final class AssignmentExpression extends Expression {
+
+        private Expression assignee;
+        private Expression value;
+
+        public AssignmentExpression(Expression assignee, Expression value) {
+            this.assignee = assignee;
+            this.value = value;
+        }
+
+        @Override
+        public Kind kind() {
+            return Kind.AssignmentExpression;
+        }
+    }
+
+    sealed abstract class Statement implements AstNode {
+
+    }
+
+    sealed abstract class Expression extends Statement {
+
+    }
+
+    @Data
+    @EqualsAndHashCode(callSuper = false)
+    @NoArgsConstructor
+    @AllArgsConstructor
+    final class MemberExpression extends Expression {
+        Expression object;
+
+        Expression property;
+
+        boolean computed;
+
+        @Override
+        public Kind kind() {
+            return Kind.MemberExpression;
+        }
+    }
+
+    @Data
+    @EqualsAndHashCode(callSuper = false)
+    @NoArgsConstructor
+    @AllArgsConstructor
+    final class CallExpression extends Expression {
+        Expression caller;
+
+        List<Expression> args;
+
+        @Override
+        public Kind kind() {
+            return Kind.CallExpression;
+        }
+    }
+    @Data
+    @EqualsAndHashCode(callSuper = false)
+    @NoArgsConstructor
+    @AllArgsConstructor
+    final class ObjectLiteral extends Expression {
+        List<PropertyLiteral> properties;
+
+        @Override
+        public Kind kind() {
+            return Kind.ObjectLiteral;
+        }
+    }
+    @Data
+    @EqualsAndHashCode(callSuper = false)
+    @NoArgsConstructor
+    @AllArgsConstructor
+    final class PropertyLiteral extends Expression {
+        String key;
+        Expression value;
+
+        @Override
+        public Kind kind() {
+            return Kind.PropertyLiteral;
+        }
+    }
+    @Data
+    @EqualsAndHashCode(callSuper = false)
+    @NoArgsConstructor
+    @AllArgsConstructor
+    final class BinaryExpression extends Expression {
+        Expression left;
+        Expression right;
+        String operator;
+
+        @Override
+        public Kind kind() {
+            return Kind.BinaryExpression;
+        }
+    }
+
+    @Data
+    @AllArgsConstructor
+    @EqualsAndHashCode(callSuper = false)
+    final class Identifier extends Expression {
+        String symbol;
+
+        @Override
+        public Kind kind() {
+            return Kind.Identifier;
+        }
+    }
+
+    @Data
+    @AllArgsConstructor
+    @EqualsAndHashCode(callSuper = false)
+    final class NumericLiteral extends Expression {
+        Number number;
+
+        @Override
+        public Kind kind() {
+            return Kind.NumericLiteral;
+        }
+    }
+}
+
+
+--------------------------------------------------------------
+
+package v.lang.frontend;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Deque;
+import java.util.List;
+
+// Orders Of Precedence
+// Assignment
+// Object
+// AdditiveExpr
+// MultiplicativeExpr
+// Call
+// Member
+// PrimaryExpr
+public class Parser {
+    private Deque<Token> tokens;
+
+    public AstNode parseToAst(String sourceCode) {
+        var tokenizer = new Tokenizer(sourceCode);
+        this.tokens = tokenizer.tokenize();
+
+        var program = new AstNode.Program();
+
+        while (this.notEOF()) {
+            program.add(this.parseStatement());
+        }
+
+        return program;
+    }
+
+
+    private AstNode.Statement parseStatement() {
+        return switch (this.at()) {
+            case Token.Const ignored -> parseVariableDeclaration();
+            case Token.Let ignored1 -> parseVariableDeclaration();
+            default -> parseExpression();
+        };
+    }
+
+    private AstNode.Statement parseVariableDeclaration() {
+        final boolean isConstant = this.eat() instanceof Token.Const;
+        final Token identifier = this.expect(Token.Identifier.class, "Expected identifier name followed by let | const keywords");
+        if (this.at() instanceof Token.Semicolon) {
+            if (isConstant) {
+                System.err.println("must assign value to const expression. No value provided");
+                System.exit(1);
+            }
+            this.eat();
+            return new AstNode.VariableDeclaration(false, identifier.value(), null);
+        }
+        this.expect(Token.Equals.class, "Expected equals token following identifier in variable declaration");
+        final AstNode.VariableDeclaration declaration = new AstNode.VariableDeclaration(isConstant, identifier.value(), parseExpression());
+        this.expect(Token.Semicolon.class, "Expected ; at the end of the variable declaration");
+        return declaration;
+    }
+
+    private AstNode.Expression parseExpression() {
+        return parseAssignmentExpression();
+    }
+
+    private AstNode.Expression parseAssignmentExpression() {
+        final AstNode.Expression left = parseObjectExpression();
+
+        if (at() instanceof Token.Equals) {
+            this.eat();
+            final AstNode.Expression value = parseAssignmentExpression();
+            this.expect(Token.Semicolon.class, "Expected ; at the end of the variable assignment");
+            return new AstNode.AssignmentExpression(left, value);
+        }
+        return left;
+    }
+
+    private AstNode.Expression parseObjectExpression() {
+        if (!this.at().equals(Token.OpenBrace.OPEN_BRACE)) {
+            return this.parseAdditiveExpression();
+        }
+        this.eat();
+        ArrayList<AstNode.PropertyLiteral> properties = new ArrayList<>();
+
+        while (this.notEOF() && !this.at().equals(Token.CloseBrace.CLOSE_BRACE)) {
+            Token identifier = this.expect(Token.Identifier.class, "Identifier expected following open braces");
+            //handle {key}
+            if (this.at().equals(Token.CloseBrace.CLOSE_BRACE)) {
+                properties.add(new AstNode.PropertyLiteral(identifier.value(), null));
+                continue;
+                //handle {key,}
+            } else if (this.at().equals(Token.Comma.COMMA)) {
+                this.eat();
+                properties.add(new AstNode.PropertyLiteral(identifier.value(), null));
+                continue;
+            } else {
+                //handle {key: value,}
+                this.expect(Token.Colon.class, "colon expected after property name");
+                AstNode.PropertyLiteral pl = new AstNode.PropertyLiteral(identifier.value(), parseExpression());
+                properties.add(pl);
+                if (!this.at().equals(Token.CloseBrace.CLOSE_BRACE)) {
+                    this.expect(Token.Comma.class, "expected comma or closing braces following a property");
+                }
+            }
+
+            this.expect(Token.CloseBrace.class, "expect closing brace expected following object properties");
+
+            return new AstNode.ObjectLiteral(properties);
+        }
+
+        return new AstNode.ObjectLiteral(properties);
+    }
+
+    private AstNode.Expression parseAdditiveExpression() {
+        AstNode.Expression left = parseMultiplicativeExpression();
+        while (this.at().value().equals("+") || this.at().value().equals("-")) {
+            final String operator = this.eat().value();
+            final AstNode.Expression right = parseMultiplicativeExpression();
+            left = new AstNode.BinaryExpression(left, right, operator);
+        }
+        return left;
+    }
+
+    private AstNode.Expression parseMultiplicativeExpression() {
+        AstNode.Expression left = parseCallMemeberExpression();
+        while (this.at().value().equals("*") || this.at().value().equals("/") || this.at().value().equals("%")) {
+            final String operator = this.eat().value();
+            final AstNode.Expression right = parseCallMemeberExpression();
+            left = new AstNode.BinaryExpression(left, right, operator);
+        }
+        return left;
+    }
+
+    private AstNode.Expression parseCallMemeberExpression() {
+        AstNode.Expression member = parseMemberExpression();
+        if (this.at().equals(Token.OpenParen.OPEN_PAREN)) {
+            return parseCallExpression(member);
+        }
+        return member;
+    }
+
+    private AstNode.Expression parseCallExpression(AstNode.Expression member) {
+        AstNode.Expression callExpression = new AstNode.CallExpression(member, parseArgs());
+        if (this.at().equals(Token.OpenParen.OPEN_PAREN)) {
+            callExpression = parseCallExpression(callExpression);
+        }
+        return callExpression;
+    }
+
+    private List<AstNode.Expression> parseArgs() {
+        this.expect(Token.OpenParen.class, "expected open params before arguments");
+        final List<AstNode.Expression> expressions = this.at().equals(Token.CloseParen.CLOSE_PAREN) ? Collections.emptyList() : parseArgsList();
+        this.expect(Token.CloseParen.class, "expected close paren following arguments list");
+        return expressions;
+    }
+
+    private List<AstNode.Expression> parseArgsList() {
+        final List<AstNode.Expression> list = new ArrayList<>();
+        list.add(this.parseAssignmentExpression());
+        while (this.at().equals(Token.Comma.COMMA)) {
+            this.eat();
+            list.add(this.parseAssignmentExpression());
+        }
+        return list;
+    }
+
+    private AstNode.Expression parseMemberExpression() {
+        AstNode.Expression object = parsePrimaryExpression();
+        while (this.at().equals(Token.Dot.DOT) || this.at().equals(Token.OpenBracket.OPEN_BRACKET)) {
+            Token operator = this.eat();
+
+            if (operator.equals(Token.Dot.DOT)) {
+                boolean computed = false;
+                AstNode.Expression property = this.parsePrimaryExpression();
+                object = new AstNode.MemberExpression(object, property, computed);
+                if (!(property instanceof AstNode.Expression.Identifier)) {
+                    System.err.println("Cannot use dot operator with out right hand side being an identifier");
+                    System.exit(1);
+                }
+            } else {
+                boolean computed = true;
+                AstNode.Expression property = this.parseExpression();
+                object = new AstNode.MemberExpression(object, property, computed);
+            }
+
+        }
+        return object;
+    }
+
+    private AstNode.Expression parsePrimaryExpression() {
+        Token token = at();
+
+        return switch (token) {
+            case Token.Number n -> new AstNode.NumericLiteral(Integer.parseInt(eat().value()));
+            case Token.Identifier id -> new AstNode.Identifier(eat().value());
+            case Token.OpenParen op -> {
+                this.eat();
+                AstNode.Expression expression = this.parseExpression();
+                this.expect(Token.CloseParen.class, "Unexpected token found inside paranthesized expression. Expected closing parenthesis");
+                yield expression;
+            }
+
+            default -> {
+                System.err.println("Unexpected token: " + token);
+                System.exit(1);
+                throw new RuntimeException();
+            }
+        };
+    }
+
+
+    private Token expect(Class<? extends Token> tokenClass, String error) {
+        final Token token = this.eat();
+        if (!tokenClass.isInstance(token)) {
+            System.err.println("Parser error:\n" + error + "\n" + tokenClass + " - Expecting; " + token);
+            System.exit(1);
+        }
+        return token;
+    }
+
+    private Token at() {
+        return tokens.peek();
+    }
+
+    private Token eat() {
+        return tokens.removeFirst();
+    }
+
+    private boolean notEOF() {
+        return !Token.Eof.EOF.equals(this.tokens.peek());
+    }
+
+
+}
+
+-----------------------------------------------------------------------------------------
+
+package v.lang.frontend;
+
+public interface Token {
+
+    String value();
+
+    record OpenBracket(String value) implements Token {
+        public static final OpenBracket OPEN_BRACKET = new OpenBracket(String.valueOf('['));
+    }
+
+    record CloseBracket(String value) implements Token {
+        public static final CloseBracket CLOSE_BRACKET = new CloseBracket(String.valueOf(']'));
+    }
+
+    record OpenParen(String value) implements Token {
+        public static final OpenParen OPEN_PAREN = new OpenParen(String.valueOf('('));
+    }
+
+    record CloseParen(String value) implements Token {
+        public static final CloseParen CLOSE_PAREN = new CloseParen(String.valueOf(')'));
+    }
+
+    record OpenBrace(String value) implements Token {
+        public static final OpenBrace OPEN_BRACE = new OpenBrace(String.valueOf('{'));
+    }
+
+    record CloseBrace(String value) implements Token {
+        public static final CloseBrace CLOSE_BRACE = new CloseBrace(String.valueOf('}'));
+    }
+
+    record Equals(String value) implements Token {
+        public static final Equals EQUALS = new Equals("=");
+    }
+
+    record BinaryOperator(String value) implements Token {
+        public static BinaryOperator of(char charAt) {
+            return new BinaryOperator(String.valueOf(charAt));
+        }
+
+    }
+
+    record Number(String value) implements Token {
+        public static Number of(String value) {
+            return new Number(value);
+        }
+    }
+
+    record Identifier(String value) implements Token {
+        public static Identifier of(String value) {
+            return new Identifier(value);
+        }
+    }
+
+
+    record Let(String value) implements Token {
+        public static final Let LET = new Let("let");
+    }
+
+    record Const(String value) implements Token {
+        public static final Const CONST = new Const("const");
+    }
+
+    record Eof(String value) implements Token {
+        public static final Eof EOF = new Eof("EOF");
+    }
+
+    record Dot(String value) implements Token {
+        public static final Dot DOT = new Dot(".");
+    }
+
+    record Comma(String value) implements Token {
+        public static final Comma COMMA = new Comma(",");
+    }
+
+    record Colon(String value) implements Token {
+        public static final Colon COLON = new Colon(":");
+    }
+
+    record Semicolon(String value) implements Token {
+        public static final Semicolon SEMICOLON = new Semicolon(";");
+    }
+}
+
+-------------------------------------------------------------------------------
+
+package v.lang.frontend;
+
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.Map;
+
+public class Tokenizer {
+    private final String source;
+
+    private static final Map<String, Token> keywords = Map.of("let", Token.Let.LET, "const", Token.Const.CONST);
+
+    public Tokenizer(String src) {
+        source = src;
+    }
+
+
+    public Deque<Token> tokenize() {
+        final Deque<Token> tokens = new ArrayDeque<>();
+
+        int length = this.source.length();
+        int index = 0;
+        while (index < length) {
+            char charAtIndex = source.charAt(index);
+            if (charAtIndex == '(') {
+                tokens.add(Token.OpenParen.OPEN_PAREN);
+            } else if (charAtIndex == ')') {
+                tokens.add(Token.CloseParen.CLOSE_PAREN);
+            } else if (charAtIndex == '[') {
+                tokens.add(Token.OpenBracket.OPEN_BRACKET);
+            } else if (charAtIndex == ']') {
+                tokens.add(Token.CloseBracket.CLOSE_BRACKET);
+            } else if (charAtIndex == '{') {
+                tokens.add(Token.OpenBrace.OPEN_BRACE);
+            } else if (charAtIndex == '}') {
+                tokens.add(Token.CloseBrace.CLOSE_BRACE);
+            } else if (charAtIndex == '-' || charAtIndex == '+' || charAtIndex == '*' || charAtIndex == '/' || charAtIndex == '%') {
+                tokens.add(Token.BinaryOperator.of(charAtIndex));
+            } else if (charAtIndex == '=') {
+                tokens.add(Token.Equals.EQUALS);
+            } else if (charAtIndex == ';') {
+                tokens.add(Token.Semicolon.SEMICOLON);
+            } else if (charAtIndex == ':') {
+                tokens.add(Token.Colon.COLON);
+            } else if (charAtIndex == '.') {
+                tokens.add(Token.Dot.DOT);
+            } else if (charAtIndex == ',') {
+                tokens.add(Token.Comma.COMMA);
+            } else {
+                //Handle multi character tokens
+                if (Character.isDigit(charAtIndex)) {
+                    int startIndex = index;
+                    while (index < length && Character.isDigit(source.charAt(index))) {
+                        index++;
+                    }
+                    tokens.add(Token.Number.of(source.substring(startIndex, index)));
+                    // index is at the exclusive right boundary.
+                    // Hence, decrementing index to be the last index of the current token
+                    // So that next common increment will take this back to the next character
+                    index--;
+                } else if (Character.isAlphabetic(charAtIndex)) {
+                    int startIndex = index;
+                    while (index < length && Character.isAlphabetic(source.charAt(index))) {
+                        index++;
+                    }
+                    String identifier = source.substring(startIndex, index);
+                    if (keywords.containsKey(identifier)) {
+                        tokens.add(keywords.get(identifier));
+                    } else {
+                        tokens.add(Token.Identifier.of(identifier));
+                    }
+                    // index is at the exclusive right boundary.
+                    // Hence, decrementing index to be the last index of the current token
+                    // So that next common increment will take this back to the next character
+                    index--;
+                } else if (isSkippable(charAtIndex)) {
+                } else {
+                    System.err.println("Invalid character '" + Character.toString(charAtIndex) + "' found. exiting");
+                    System.exit(1);
+                }
+            }
+            index++;
+        }
+
+        tokens.add(Token.Eof.EOF);
+        return tokens;
+    }
+
+
+    private boolean isSkippable(char ch) {
+        return ch == ' ' || ch == '\n' || ch == '\t' || ch == '\r';
+    }
+}
+
+
+-------------------------------------------------------------------------
+
+
+package v.lang.runtime;
+
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+
+
+public class Environment {
+
+    private final Environment parent;
+
+    private final Map<String, RuntimeVal> variables = new HashMap<>();
+    private final Set<String> constants = new HashSet<>();
+
+    public Environment(Environment parent) {
+        this.parent = parent;
+    }
+
+    public static Environment defautlEnvironment() {
+        final Environment environment = new Environment(null);
+        environment.declareVariable("true", RuntimeVal.BooleanVal.TRUE, true);
+        environment.declareVariable("false", RuntimeVal.BooleanVal.FALSE, true);
+        environment.declareVariable("null", RuntimeVal.NullVal.NULL_VAL, true);
+        return environment;
+    }
+
+    public RuntimeVal declareVariable(String variable, RuntimeVal value, boolean isConstant) {
+        if (variables.containsKey(variable)) {
+            System.err.println("Variable is already defined; " + variable + " = " + value);
+            System.exit(1);
+        }
+        if (isConstant) {
+            constants.add(variable);
+        }
+        this.variables.putIfAbsent(variable, value);
+        return value;
+    }
+
+    public RuntimeVal assignVariable(String variable, RuntimeVal val) {
+        final Environment env = resolve(variable);
+        boolean isConstant = env.constants.contains(variable);
+        if (isConstant) {
+            System.err.println("Cannot reassign variable " + variable + " as it is already defined as a constant");
+            System.exit(2);
+        }
+        env.variables.put(variable, val);
+        return val;
+    }
+
+    public RuntimeVal lookupVariable(String variable) {
+        final Environment env = this.resolve(variable);
+        return env.variables.get(variable);
+    }
+
+    public Environment resolve(String variable) {
+        if (this.variables.containsKey(variable)) {
+            return this;
+        }
+
+        if (this.parent == null) {
+            System.err.println("Variable is not defined; " + variable);
+            System.exit(1);
+        }
+
+        return parent.resolve(variable);
+    }
+}
+
+
+--------------------------------------------------------------------
+
+
+
+package v.lang.runtime;
+
+
+import v.lang.JsonPrinter;
+import v.lang.frontend.AstNode;
+
+import java.util.HashMap;
+import java.util.Objects;
+
+public class Interpreter {
+
+    public RuntimeVal evaluate(AstNode astNode, Environment environment) {
+        return switch (astNode) {
+            case AstNode.Program program -> evaluateProgram(program, environment);
+            case AstNode.VariableDeclaration vd -> evaluateVariableDeclaration(vd, environment);
+            case AstNode.AssignmentExpression assignmentExpression ->
+                    evaluateAssignmentExpression(assignmentExpression, environment);
+            case AstNode.BinaryExpression be -> evaluateBinaryExpression(be, environment);
+            case AstNode.MemberExpression me -> evaluateMemberException(me, environment);
+            case AstNode.CallExpression ce -> evaluateCallExpression(ce, environment);
+            case AstNode.Statement statement -> evaluateStatement(statement, environment);
+            default -> throw new IllegalStateException("Unexpected value: " + astNode);
+        };
+    }
+
+    private RuntimeVal evaluateCallExpression(AstNode.CallExpression ce, Environment environment) {
+        return null;
+    }
+
+    private RuntimeVal evaluateMemberException(AstNode.MemberExpression me, Environment environment) {
+        if (me.isComputed()) {
+            final RuntimeVal.ObjectVal objectVal = (RuntimeVal.ObjectVal) evaluate(me.getObject(), environment);
+            return objectVal.properties().get(((AstNode.Expression.Identifier) me.getProperty()).getSymbol());
+        } else {
+            final AstNode.Expression.Identifier object = (AstNode.Expression.Identifier) me.getObject();
+            final AstNode.Expression.Identifier property = (AstNode.Expression.Identifier) me.getProperty();
+            final RuntimeVal runtimeVal = environment.lookupVariable(object.getSymbol());
+            if (runtimeVal == null) {
+                System.err.println("object is " + object.getSymbol() + " not defined in this scope");
+                System.exit(1);
+            }
+
+            final RuntimeVal.ObjectVal val = (RuntimeVal.ObjectVal) runtimeVal;
+            if (!val.properties().containsKey(property.getSymbol())) {
+                System.err.println("field " + property.getSymbol() + " not defined in " + object.getSymbol() + " object");
+                System.exit(1);
+            }
+            return val.properties().get(property.getSymbol());
+        }
+    }
+
+    private RuntimeVal evaluateAssignmentExpression(AstNode.AssignmentExpression variableAssignment, Environment environment) {
+        final AstNode.Expression assignmentValue = variableAssignment.getValue();
+        final AstNode.Identifier assignee = evaluateAssignee(variableAssignment.getAssignee());
+
+        environment.assignVariable(assignee.getSymbol(), evaluate(assignmentValue, environment));
+        return evaluate(assignmentValue, environment);
+    }
+
+    private AstNode.Identifier evaluateAssignee(AstNode.Expression expression) {
+        if (!(expression instanceof AstNode.Identifier)) {
+            final String message = "Invalid left hand side " + JsonPrinter.toJsonString(expression);
+            System.err.println(message);
+            System.exit(1);
+        }
+        return (AstNode.Identifier) expression;
+    }
+
+    private RuntimeVal evaluateVariableDeclaration(AstNode.VariableDeclaration vd, Environment environment) {
+        final AstNode.Expression expression = vd.getValue();
+        final RuntimeVal value = Objects.isNull(expression) ? RuntimeVal.NullVal.NULL_VAL : evaluate(expression, environment);
+        environment.declareVariable(vd.getIdentifier(), value, vd.isConstant());
+        return value;
+    }
+
+    private RuntimeVal evaluateStatement(AstNode.Statement statement, Environment environment) {
+        return switch (statement) {
+            case AstNode.BinaryExpression binaryExpression -> evaluateBinaryExpression(binaryExpression, environment);
+            case AstNode.Identifier identifier -> evaluateIdentifier(identifier, environment);
+            case AstNode.NumericLiteral numericLiteral -> new RuntimeVal.NumberVal(numericLiteral.getNumber());
+            case AstNode.ObjectLiteral objectLiteral -> evaluateObjectLiteral(environment, objectLiteral);
+            case AstNode.PropertyLiteral propertyLiteral -> evaluatePropertyLiteral(environment, propertyLiteral);
+            default -> throw new IllegalStateException("Unexpected value: " + statement);
+        };
+    }
+
+    private RuntimeVal evaluatePropertyLiteral(Environment environment, AstNode.PropertyLiteral propertyLiteral) {
+        if (Objects.isNull(propertyLiteral.getValue())) {
+            return evaluateIdentifier(new AstNode.Identifier(propertyLiteral.getKey()), environment);
+        }
+        return evaluate(propertyLiteral.getValue(), environment);
+    }
+
+    private RuntimeVal evaluateObjectLiteral(Environment environment, AstNode.ObjectLiteral objectLiteral) {
+        final RuntimeVal.ObjectVal objectVal = new RuntimeVal.ObjectVal(new HashMap<>());
+        for (AstNode.PropertyLiteral property : objectLiteral.getProperties()) {
+            final RuntimeVal val = evaluate(property, environment);
+            objectVal.properties().put(property.getKey(), val);
+        }
+        return objectVal;
+    }
+
+    private RuntimeVal evaluateIdentifier(AstNode.Identifier identifier, Environment environment) {
+        return environment.lookupVariable(identifier.getSymbol());
+    }
+
+    private RuntimeVal evaluateBinaryExpression(AstNode.BinaryExpression be, Environment environment) {
+        final RuntimeVal lhs = evaluate(be.getLeft(), environment);
+        final RuntimeVal rhs = evaluate(be.getRight(), environment);
+        final String operator = be.getOperator();
+        if (lhs instanceof RuntimeVal.NumberVal lhsNumberVal && rhs instanceof RuntimeVal.NumberVal rhsNumberVal) {
+            return evalNumericBinaryExpression(lhsNumberVal, rhsNumberVal, operator);
+        }
+        return RuntimeVal.NullVal.NULL_VAL;
+    }
+
+    private RuntimeVal evalNumericBinaryExpression(RuntimeVal.NumberVal lhs, RuntimeVal.NumberVal rhs, String operator) {
+        final Number result = switch (operator) {
+            case "+" -> lhs.number().intValue() + rhs.number().intValue();
+            case "-" -> lhs.number().intValue() - rhs.number().intValue();
+            case "*" -> lhs.number().intValue() * rhs.number().intValue();
+            case "/" -> lhs.number().intValue() / rhs.number().intValue();
+            default -> lhs.number().intValue() % rhs.number().intValue();
+        };
+
+        return new RuntimeVal.NumberVal(result);
+    }
+
+    private RuntimeVal evaluateProgram(AstNode.Program program, Environment environment) {
+        RuntimeVal runtimeVal = RuntimeVal.NullVal.NULL_VAL;
+        for (AstNode.Statement statement : program.getBody()) {
+            runtimeVal = evaluate(statement, environment);
+        }
+        return runtimeVal;
+    }
+}
+
+
+-----------------------------------------
+
+
+package v.lang.runtime;
+
+import java.util.HashMap;
+
+public interface RuntimeVal {
+    record NumberVal(Number number) implements RuntimeVal {
+
+    }
+
+    record NullVal() implements RuntimeVal {
+        public static NullVal NULL_VAL = new NullVal();
+    }
+
+    record BooleanVal(boolean bool) implements RuntimeVal {
+        public static final BooleanVal TRUE = new BooleanVal(true);
+        public static final BooleanVal FALSE = new BooleanVal(false);
+    }
+
+
+    record ObjectVal(HashMap<String, RuntimeVal> properties) implements RuntimeVal {
+
+    }
+}
+
+
+-----------------------------------------------------
+
+
+package v.lang;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectWriter;
+
+public class JsonPrinter {
+    private static final ObjectMapper objectMapper;
+    private static final ObjectWriter objectWriter;
+
+    static {
+        objectMapper = new ObjectMapper();
+        objectWriter = objectMapper.writerWithDefaultPrettyPrinter();
+//            objectWriter = objectMapper.writer();
+    }
+
+    public static String toJsonString(Object object) {
+        try {
+            return objectWriter.writeValueAsString(object);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static class Sample {
+        String name;
+    }
+
+    private static void reassign(Sample s){
+        s = new Sample(); // ref2 -> 101
+        s.name = "Reassigned";
+    }
+    public static void main(String[] args) {
+
+        Sample sample = new Sample(); // ref1 -> 100
+        sample.name = "Assigned";
+
+        reassign(sample); // ref2 -> 100
+
+        System.out.println(sample.name);
+    }
+}
+
+
+------------------------------------------------------
+
+package v.lang;
+
+import v.lang.frontend.AstNode;
+import v.lang.frontend.Parser;
+import v.lang.runtime.Environment;
+import v.lang.runtime.Interpreter;
+import v.lang.runtime.RuntimeVal;
+
+import java.util.Scanner;
+
+public class Main {
+    public static void main(String[] args) {
+        repl();
+    }
+
+
+    public static void repl() {
+        final Parser parser = new Parser();
+        final Interpreter interpreter = new Interpreter();
+        final Environment environment = Environment.defautlEnvironment();
+
+        System.out.println("\nRepl 1.0");
+        final Scanner scanner = new Scanner(System.in);
+
+        while (true) {
+            System.out.print("> ");
+            final String sourceCode = scanner.nextLine();
+            final AstNode astNode = parser.parseToAst(sourceCode);
+            final RuntimeVal result = interpreter.evaluate(astNode, environment);
+            System.out.println(JsonPrinter.toJsonString(result));
+        }
+    }
+
+}
+
+
+
+------------------------------------------------------
+
+
+
+package v.lang;
+
+import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+class PasswordValidator {
+
+
+    public static final String SPECIAL_CHARACTERS = " !#$%&'()*+,-./:;<=>?@[]^_`{|}";
+
+    public boolean validate(String password) {
+        final List<String> errors = new ArrayList<>();
+        int numbers = 0;
+        int capitalLetters = 0;
+        int specialChars = 0;
+        if (password.length() < 8) {
+            errors.add("Password must be at least 8 characters");
+        }
+        for (int i = 0; i < password.length(); i++) {
+            if (Character.isDigit(password.charAt(i))) {
+                numbers++;
+            }
+            if (Character.isUpperCase(password.charAt(i))) {
+                capitalLetters++;
+            }
+
+            if (SPECIAL_CHARACTERS.contains(Character.toString(password.charAt(i)))) {
+                specialChars++;
+            }
+        }
+
+        if (numbers < 2) {
+            errors.add("The password must contain at least 2 numbers");
+        }
+        if (capitalLetters < 1) {
+            errors.add("password must contain at least one capital letter");
+        }
+        if (specialChars < 1) {
+            errors.add("password must contain at least one special character");
+        }
+        if (!errors.isEmpty()) {
+            throw new RuntimeException(String.join("\n", errors));
+        }
+        return true;
+    }
+}
+
+public class PasswordValidatorTest {
+    private final PasswordValidator validator = new PasswordValidator();
+
+    @Test
+    void test_password_with_length_less_than_8_passed_return_error() {
+        assertThatThrownBy(() -> validator.validate("aga"))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("Password must be at least 8 characters");
+    }
+
+    @Test
+    void test_password_with_out_two_numbers_passed_return_error() {
+        assertThatThrownBy(() -> validator.validate("abcdefgh"))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("The password must contain at least 2 numbers");
+    }
+
+    @Test
+    void test_validate_should_give_multiple_error_messages_together() {
+        assertThatThrownBy(() -> validator.validate("abcefgh"))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("Password must be at least 8 characters\nThe password must contain at least 2 numbers");
+    }
+
+    @Test
+    void test_validate_given_password_without_uppercase_character_should_return_error() {
+        assertThatThrownBy(() -> validator.validate("abcefgh&12"))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessage("password must contain at least one capital letter");
+    }
+    @Test
+    void test_validate_given_password_without_special_character_should_return_error() {
+        assertThatThrownBy(() -> validator.validate("Abcefgh12"))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessage("password must contain at least one special character");
+    }
+    @Test
+    void test_validate_given_valid_password_should_return_true() {
+        assertThat(validator.validate("Abcdefg123&&")).isTrue();
+    }
+}
+
+-------------------------------------------------------------------------------
+
+package v.lang;
+
+
+import org.junit.jupiter.api.Test;
+
+import java.util.Arrays;
+import java.util.List;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+class StringCalculator {
+
+    private static final String NEW_LINE = "\n";
+    public static final String CUSTOM_DELIMITER_PREFIX = "//";
+    private final String defaultDelimiter;
+
+    StringCalculator() {
+        this.defaultDelimiter = ",";
+    }
+
+    int add(String numbers) {
+        if (isEmpty(numbers)) {
+            return 0;
+        }
+
+
+        final String delimiter = getDelimiter(numbers);
+        numbers = trimCustomDelimiterPrefix(numbers, delimiter);
+        numbers = replaceNewLinesWithDelimiter(numbers, delimiter);
+
+        final List<String> nonDelimiters = getNonDelimiterStrings(numbers, delimiter);
+        final StringBuilder errorMessage = new StringBuilder();
+
+        if (!nonDelimiters.isEmpty()) {
+            for (String nonDelimiter : nonDelimiters) {
+                errorMessage.append("‘%s’ expected but ‘%s’ found at position %d.".formatted(
+                        delimiter,
+                        nonDelimiter,
+                        numbers.indexOf(nonDelimiter)
+                ));
+                numbers = numbers.replace(nonDelimiter, delimiter);
+            }
+        }
+
+        throwIfInputNotEndWithNumber(numbers);
+
+        final List<Integer> nums = getNumbers(numbers, delimiter);
+        checkForNegativeNumbersAndUpdateErrorMessage(errorMessage, nums);
+
+        if (errorMessage.length() > 0) {
+            throw new RuntimeException(errorMessage.toString());
+        }
+        return nums.stream()
+                .reduce(0, Integer::sum);
+    }
+
+    private static List<String> getNonDelimiterStrings(String numbers, String delimiter) {
+        return Stream.of(numbers.split("-?\\d"))
+                .filter(Predicate.not(String::isEmpty))
+                .filter(it -> !it.equals(delimiter))
+                .toList();
+    }
+
+    private static void checkForNegativeNumbersAndUpdateErrorMessage(StringBuilder errorMessage, List<Integer> nums) {
+        final String negativeNumbers = nums.stream()
+                .filter(n -> n < 0)
+                .map(String::valueOf)
+                .collect(Collectors.joining(", "));
+
+        if (negativeNumbers.isEmpty()) {
+            return;
+        }
+        errorMessage.insert(0, "Negative number(s) not allowed: " + negativeNumbers);
+    }
+
+    private static List<Integer> getNumbers(String numbers, String delimiter) {
+        return Arrays.stream(numbers.split(delimiter))
+                .map(Integer::parseInt)
+                .toList();
+    }
+
+    private String replaceNewLinesWithDelimiter(String numbers, String delimiter) {
+        return numbers.replace(NEW_LINE, delimiter);
+    }
+
+    private String trimCustomDelimiterPrefix(String numbers, String delimiter) {
+        if (numbers.startsWith(CUSTOM_DELIMITER_PREFIX)) {
+            return numbers.substring(CUSTOM_DELIMITER_PREFIX.length() + delimiter.length() + NEW_LINE.length());
+        }
+        return numbers;
+    }
+
+    private String getDelimiter(String numbers) {
+        if (numbers.startsWith(CUSTOM_DELIMITER_PREFIX)) {
+            int customDelimiterStart = numbers.lastIndexOf(CUSTOM_DELIMITER_PREFIX) + 2;
+            int customDelimiterEnd = numbers.indexOf(NEW_LINE);
+            return numbers.substring(customDelimiterStart, customDelimiterEnd);
+        }
+        return defaultDelimiter;
+    }
+
+    private static void throwIfInputNotEndWithNumber(String numbers) {
+        if (!Character.isDigit(numbers.charAt(numbers.length() - 1))) {
+            throw new RuntimeException("input string should end with number");
+        }
+    }
+
+    private static boolean isEmpty(String numbers) {
+        return numbers == null || numbers.isEmpty();
+    }
+}
+
+public class StringCalculatorTest {
+
+    final StringCalculator stringCalculator = new StringCalculator();
+
+    @Test
+    void test_add_null_string_passed_return_zero() {
+        assertThat(stringCalculator.add(null)).isEqualTo(0);
+    }
+
+    @Test
+    void test_add_empty_string_passed_return_zero() {
+        assertThat(stringCalculator.add("")).isEqualTo(0);
+    }
+
+    @Test
+    void test_add_single_number_string_passed_return_number() {
+        assertThat(stringCalculator.add("1")).isEqualTo(1);
+    }
+
+    @Test
+    void test_add_two_numbers_string_passed_return_sum() {
+        assertThat(stringCalculator.add("1,2")).isEqualTo(3);
+    }
+
+    @Test
+    void test_add_multi_number_string_passed_return_sum() {
+        assertThat(stringCalculator.add("1,2,3")).isEqualTo(6);
+    }
+
+    @Test
+    void test_add_multi_number_string_separated_by_new_line_passed_return_sum() {
+        assertThat(stringCalculator.add("1,2\n3")).isEqualTo(6);
+    }
+
+    @Test
+    void test_add_multi_number_string_separated_by_invalid_separator_passed_return_exception() {
+        assertThatThrownBy(() -> stringCalculator.add("1,2,\n3"), "invalid separator found");
+    }
+
+    @Test
+    void test_add_multi_number_string_with_separator_at_the_end_passed_return_exception() {
+        assertThatThrownBy(() -> stringCalculator.add("1,2,3,"))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("input string should end with number");
+    }
+
+    @Test
+    void test_add_multi_number_string_with_custom_separator_passed_return_sum() {
+        int sum = stringCalculator.add("//,\n1,2,3");
+        assertThat(sum).isEqualTo(6);
+    }
+
+    @Test
+    void test_add_multi_number_string_with_multi_char_custom_separator_passed_return_sum() {
+        int sum = stringCalculator.add("//sep\n2sep5");
+        assertThat(sum).isEqualTo(7);
+    }
+
+    @Test
+    void test_add_multi_number_string_with_custom_separator_and_another_invalid_separator_in_between_numbers_passed_return_exception() {
+        assertThatThrownBy(() -> stringCalculator.add("//sep\n2sep5,6"))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("‘sep’ expected but ‘,’ found at position 5.");
+    }
+
+    @Test
+    void test_add_multi_number_string_with_negative_number_passed_return_exception() {
+        assertThatThrownBy(() -> stringCalculator.add("//sep\n2sep-5sep2"))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("Negative number(s) not allowed: -5");
+        assertThatThrownBy(() -> stringCalculator.add("2,-4,-9"))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("Negative number(s) not allowed: -4, -9");
+    }
+
+    @Test
+    void test_add_multi_number_string_with_negative_number_and_invalid_separator_passed_return_exception() {
+        assertThatThrownBy(() -> stringCalculator.add("//sep\n2sep-5,2"))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("Negative number(s) not allowed: -5‘sep’ expected but ‘,’ found at position 6.");
+    }
+
+    @Test
+    void test_add_multi_number_string_with_negative_numbers_and_invalid_separators_passed_return_exception() {
+        assertThatThrownBy(() -> stringCalculator.add("//sep\n2sep-5,2|-9"))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessage("Negative number(s) not allowed: -5, -9‘sep’ expected but ‘,’ found at position 6.‘sep’ expected but ‘|’ found at position 10.");
+    }
+}
+
+----------------------------------------------------------------------------------
+
+package v.lang;
+
+import static org.assertj.core.api.Assertions.*;
+
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
+class IncomeTaxCalculator {
+
+    private final int standardDeduction;
+
+    IncomeTaxCalculator(int standardDeduction, List<TaxSlab> taxSlabsNew) {
+        this.standardDeduction = standardDeduction;
+        this.taxSlabs = taxSlabsNew;
+    }
+
+    record Range(int start, int end) {
+        Range {
+            if (end < start) {
+                throw new IllegalArgumentException("start is greater than end");
+            }
+            if (start < 0) {
+                throw new IllegalArgumentException("start shouldn't be less than 0");
+            }
+        }
+        int taxableAmountInRange(int num) {
+            if (num < start) {
+                return 0;
+            }
+
+            if (num > end) {
+                return end - start;
+            }
+
+            return num - start;
+        }
+    }
+
+    record TaxSlab(Range range, int percentage) {
+        int calculateTax(int income) {
+            return range.taxableAmountInRange(income) * percentage / 100;
+        }
+    }
+
+    private final List<TaxSlab> taxSlabs;
+
+    static final List<TaxSlab> TAX_SLAB_NEW = List.of(
+            new TaxSlab(new Range(0, 300000), 0),
+            new TaxSlab(new Range(300000, 600000), 5),
+            new TaxSlab(new Range(600000, 900000), 10),
+            new TaxSlab(new Range(900000, 1200000), 15),
+            new TaxSlab(new Range(1200000, 1500000), 20),
+            new TaxSlab(new Range(1500000, Integer.MAX_VALUE), 30)
+    );
+
+    static final List<TaxSlab> TAX_SLAB_PREVIOUS = List.of(
+            new TaxSlab(new Range(0, 250000), 0),
+            new TaxSlab(new Range(250000, 500000), 5),
+            new TaxSlab(new Range(500000, 750000), 10),
+            new TaxSlab(new Range(750000, 1000000), 15),
+            new TaxSlab(new Range(1000000, 1250000), 20),
+            new TaxSlab(new Range(1250000, 1500000), 25),
+            new TaxSlab(new Range(1500000, Integer.MAX_VALUE), 30)
+    );
+    public int calculateTax(int income) {
+        final int taxableIncome = income - standardDeduction;
+
+        return taxSlabs.stream()
+                .map(taxSlab -> taxSlab.calculateTax(taxableIncome))
+                .reduce(0, Integer::sum);
+    }
+
+    public int incomeAfterTax(int income) {
+        return income - calculateTax(income);
+    }
+
+    public double effectiveTaxInPercentage(int income) {
+        int calculate = calculateTax(income);
+        return ((double) calculate / income) * 100;
+    }
+}
+
+public class TaxCalculatorTest {
+
+    public final IncomeTaxCalculator taxCalculatorNew = new IncomeTaxCalculator(52500, IncomeTaxCalculator.TAX_SLAB_NEW);
+    public final IncomeTaxCalculator taxCalculatorPrev = new IncomeTaxCalculator(52500, IncomeTaxCalculator.TAX_SLAB_PREVIOUS);
+
+    @Test
+    void test_income_less_than_3_lakh_passed_tax_is_zero() {
+        assertThat(taxCalculatorNew.calculateTax(300000)).isEqualTo(0);
+    }
+
+    @Test
+    void test_income_less_than_7_lakh_passed_tax_is_25000() {
+        assertThat(taxCalculatorNew.calculateTax(700000)).isEqualTo(25000);
+    }
+
+    @Test
+    void test_income_less_than_9_lakh_passed_tax_is_45000() {
+        assertThat(taxCalculatorNew.calculateTax(900000)).isEqualTo(45000);
+    }
+
+    @Test
+    void test_income_less_than_36_lakh_passed_tax_is_45000() {
+        int income = 3600000;
+        int prevTax = taxCalculatorPrev.calculateTax(income);
+        System.out.println(prevTax);
+        System.out.println(taxCalculatorPrev.incomeAfterTax(income));
+        System.out.println(taxCalculatorPrev.effectiveTaxInPercentage(income));
+        System.out.println("-------------------------");
+        int newTax = taxCalculatorNew.calculateTax(income);
+        System.out.println(newTax);
+        System.out.println(taxCalculatorNew.incomeAfterTax(income));
+        System.out.println(taxCalculatorNew.effectiveTaxInPercentage(income));
+
+        System.out.println("Difference in tax: " + (prevTax - newTax));
+    }
+}
+
+
+------------------------------------------------------------------------
+
+
+package v.lang;
+
+import org.junit.jupiter.api.Test;
+
+import java.util.*;
+import java.util.function.Consumer;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class TransitiveDependencyDriver {
+
+    record Artifact(String name, Set<Artifact> dependencies) {
+
+        Artifact(String name) {
+            this(name, new HashSet<>());
+        }
+
+
+        Set<Artifact> transitiveDependencies() {
+            final Set<Artifact> results = new HashSet<>();
+            final Set<Artifact> visited = new HashSet<>();
+
+            findTransitiveDependencies(this, results, visited);
+            return results;
+        }
+
+        private void findTransitiveDependencies(Artifact artifact, Set<Artifact> result, Set<Artifact> visited) {
+            if (visited.contains(artifact)) {
+                return;
+            }
+            visited.add(artifact);
+            for (Artifact dependency : artifact.dependencies) {
+                if (visited.contains(dependency)) {
+                    continue;
+                }
+                result.add(dependency);
+                findTransitiveDependencies(dependency, result, visited);
+            }
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+
+            Artifact artifact = (Artifact) o;
+
+            return name.equals(artifact.name);
+        }
+
+        @Override
+        public int hashCode() {
+            return name.hashCode();
+        }
+    }
+
+    static class DependencyGraph {
+
+        private final Map<String, Artifact> artifactsByName;
+
+        DependencyGraph() {
+            this.artifactsByName = new HashMap<>();
+        }
+
+        private static DependencyGraph of(List<String> artifacts) {
+            final DependencyGraph dependencyGraph = new DependencyGraph();
+            for (final String artifact : artifacts) {
+                final String[] s = artifact.split(" ");
+                if (s.length < 1) continue;
+
+                final String artifactName = s[0];
+                dependencyGraph.addArtifact(artifactName);
+
+                for (int i = 1; i < s.length; i++) {
+                    final String dependency = s[i];
+                    dependencyGraph.addArtifact(dependency);
+                    dependencyGraph.addDependency(artifactName, dependency);
+                }
+            }
+            return dependencyGraph;
+        }
+
+        void addArtifact(String name) {
+            this.artifactsByName.putIfAbsent(name, new Artifact(name));
+        }
+
+        void addDependency(String artifactName, String dependency) {
+            this.artifactsByName.get(artifactName)
+                    .dependencies()
+                    .add(this.artifactsByName.get(dependency));
+        }
+
+
+        Collection<Artifact> artifacts() {
+            return artifactsByName.values();
+        }
+
+        void forEach(Consumer<Artifact> artifactConsumer) {
+            artifacts().forEach(artifactConsumer);
+        }
+    }
+
+    List<String> showTransitiveDependencies(List<String> artifacts) {
+        final DependencyGraph dependencyGraph = DependencyGraph.of(artifacts);
+
+        final List<String> result = new ArrayList<>();
+        dependencyGraph.forEach(artifact -> {
+            final List<String> transitive = artifact.transitiveDependencies()
+                    .stream()
+                    .map(Artifact::name)
+                    .sorted()
+                    .toList();
+            if (!transitive.isEmpty()) {
+                result.add(artifact.name() + " " + String.join("", transitive));
+            }
+        });
+        return result;
+    }
+
+
+}
+
+public class TransitiveDependencyTest {
+
+    private final TransitiveDependencyDriver transitiveDependencyDriver = new TransitiveDependencyDriver();
+
+    @Test
+    void show_transitive_dependencies_should_give_back_dependencies_where_there_are_no_transitive_dependency() {
+        assertThat(transitiveDependencyDriver.showTransitiveDependencies(List.of("A B C"))).contains("A BC");
+    }
+
+    @Test
+    void show_transitive_dependencies_should_give_back_dependencies_where_there_is_one_transitive_dependency() {
+        assertThat(transitiveDependencyDriver.showTransitiveDependencies(List.of("A B C", "C D"))).contains("A BCD", "C D");
+    }
+
+    @Test
+    void show_transitive_dependencies_should_give_back_dependencies_where_there_is_two_transitive_dependency() {
+        assertThat(transitiveDependencyDriver.showTransitiveDependencies(List.of("A B C", "C D", "D E"))).contains("A BCDE", "C DE", "D E");
+    }
+
+    @Test
+    void show_transitive_dependencies_should_give_back_dependencies_where_there_is_many_transitive_dependency() {
+        assertThat(transitiveDependencyDriver.showTransitiveDependencies(List.of("A B C", "B C E", "C G", "D A F", "E F", "F H"))).contains("A BCEFGH", "B CEFGH", "C G", "D ABCEFGH", "F H");
+    }
+
+    @Test
+    void show_transitive_dependencies_should_give_not_show_dependencies_where_there_is_cycles_in_transitive_dependency() {
+        assertThat(transitiveDependencyDriver.showTransitiveDependencies(List.of("A B", "B A"))).contains("A B", "B A");
+    }
+}
+
+
+
+---------------------------------------------------
+
+
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>org.example</groupId>
+    <artifactId>v-lang</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <source>19</source>
+                    <target>19</target>
+                    <compilerArgs>--enable-preview</compilerArgs>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+    <properties>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <version>1.18.24</version>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-core</artifactId>
+            <version>2.13.4</version>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>2.13.4.2</version>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-api</artifactId>
+            <version>5.8.2</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>3.24.2</version>
+            <scope>test</scope>
+        </dependency>
+
+
+    </dependencies>
+
+
+</project>
+-----------------------------------
+
+"" Source your .vimrc
+"source ~/.vimrc
+
+nnoremap <SPACE> <Nop>
+let mapleader=" "
+"" -- Suggested options --
+" Show a few lines of context around the cursor. Note that this makes the
+" text scroll if you mouse-click near the start or end of the window.
+set scrolloff=5
+
+" Do incremental searching.
+set incsearch
+
+" Don't use Ex mode, use Q for formatting.
+map Q gq
+
+
+"" -- Map IDE actions to IdeaVim -- https://jb.gg/abva4t
+"" Map \r to the Reformat Code action
+"map \r <Action>(ReformatCode)
+
+"" Map <leader>d to start debug
+map <leader>d <Action>(Debug)
+map <leader>r <Action>(Run)
+
+"" Map \b to toggle the breakpoint on the current line
+"map \b <Action>(ToggleLineBreakpoint)
+
+map <leader>y "+y
+map <leader>p "+p
+nnoremap <C-d> <C-d>zz
+nnoremap <C-u> <C-u>zz
+nnoremap n nzzzv
+nnoremap N Nzzzv
+
+" Find more examples here: https://jb.gg/share-ideavimrc
+
+" turn hybrid line numbers on
+:set number relativenumber
+:set nu rnu
